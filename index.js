@@ -1,13 +1,6 @@
-import express from "express";
-import bodyParser from "body-parser";
-import fetch from "node-fetch"; // optional if you forward
-
-const app = express();
-app.use(bodyParser.json());
-
 app.post("/ipn", async (req, res) => {
   try {
-    // 1. Basic Auth check (already in Postman)
+    // Basic Auth check
     const auth = req.headers.authorization || "";
     const base64 = auth.split(" ")[1] || "";
     const [user, pass] = Buffer.from(base64, "base64")
@@ -21,19 +14,57 @@ app.post("/ipn", async (req, res) => {
       });
     }
 
-    // 2. Validate JSON payload
     const body = req.body;
-    if (!body || !body.TransactionId) {
+
+    // Handle cron ping (empty JSON) -> don't insert
+    if (!body || Object.keys(body).length === 0) {
+      return res.status(200).json({
+        MessageCode: "200",
+        Message: "Ping received"
+      });
+    }
+
+    // Validate real IPN
+    if (!body.TransactionId) {
       return res.status(400).json({
         MessageCode: "400",
         Message: "Missing required field TransactionId"
       });
     }
 
-    // 3. Insert into Supabase (pseudo-code)
-    // await supabase.from("coop_bank_transactions").insert({ ...body });
+    // -----------------------------
+    // Insert ONLY if this is a real IPN
+    // -----------------------------
+    const { error } = await supabase
+      .from("coop_bank_transactions")
+      .insert({
+        acct_no: body.AcctNo,
+        amount: Number(body.Amount),
+        booked_balance: body.BookedBalance,
+        cleared_balance: body.ClearedBalance,
+        currency: body.Currency,
+        cust_memo_line1: body.CustMemoLine1,
+        cust_memo_line2: body.CustMemoLine2,
+        cust_memo_line3: body.CustMemoLine3,
+        event_type: body.EventType,
+        exchange_rate: body.ExchangeRate,
+        narration: body.Narration,
+        payment_ref: body.PaymentRef,
+        posting_date: body.PostingDate,
+        value_date: body.ValueDate,
+        transaction_date: body.TransactionDate,
+        transaction_id: body.TransactionId,
+      });
 
-    // 4. Return success JSON
+    if (error) {
+      console.error("Supabase insert error:", error);
+      return res.status(500).json({
+        MessageCode: "500",
+        Message: "Database error"
+      });
+    }
+
+    // Return success for real IPN
     return res.status(200).json({
       MessageCode: "200",
       Message: "Successfully received data"
@@ -46,8 +77,4 @@ app.post("/ipn", async (req, res) => {
       Message: "Internal server error"
     });
   }
-});
-
-app.listen(process.env.PORT || 3000, () => {
-  console.log("IPN relay running");
 });
