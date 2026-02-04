@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import express from 'express';
 import { createClient } from '@supabase/supabase-js';
 
@@ -6,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 // 1. Initialize Supabase
-// Ensure these variables are in your Render "Environment" tab
+// Render injects SUPABASE_URL and SUPABASE_KEY directly into the environment
 const supabase = createClient(
     process.env.SUPABASE_URL, 
     process.env.SUPABASE_KEY
@@ -14,6 +13,7 @@ const supabase = createClient(
 
 /**
  * HELPER: Extracts the core reference ID from Coop Bank's tilde narration.
+ * Example: TI28ZF3AQY~631412 -> TI28ZF3AQY
  */
 const extractFinalRef = (narration) => {
     if (!narration) return null;
@@ -28,7 +28,7 @@ const extractFinalRef = (narration) => {
 };
 
 /**
- * MIDDLEWARE: Validates the bank's Basic Auth
+ * MIDDLEWARE: Validates the bank's Basic Auth using Env Variables
  */
 const authenticateIPN = (req, res, next) => {
     const authHeader = req.headers.authorization;
@@ -49,14 +49,14 @@ const authenticateIPN = (req, res, next) => {
  * ROUTES
  */
 
-// Health Check for Render
-app.get('/', (req, res) => res.status(200).send('IPN Relay Active'));
+// 1. Health Check (Required for Render's zero-downtime deploys)
+app.get('/', (req, res) => res.status(200).send('Coop IPN Relay is Online'));
 
-// Bank Webhook Endpoint
+// 2. The Bank Webhook Endpoint
 app.post('/ipn', authenticateIPN, async (req, res) => {
     const payload = req.body;
 
-    // Safety: Ignore empty/health check pings from the bank
+    // Validate payload existence (prevents crashing on empty pings)
     if (!payload || !payload.TransactionId) {
         return res.status(400).json({ status: "Error", message: "Missing TransactionId" });
     }
@@ -76,20 +76,20 @@ app.post('/ipn', authenticateIPN, async (req, res) => {
                 narration: payload.Narration,
                 payment_ref: payload.PaymentRef,
                 transaction_date: payload.TransactionDate,
-                final_payment_ref: finalRef, // The extracted ID
+                final_payment_ref: finalRef, // Our extracted M-Pesa/Ref code
                 event_type: payload.EventType,
                 cust_memo_line1: payload.CustMemoLine1,
                 cust_memo_line2: payload.CustMemoLine2,
                 cust_memo_line3: payload.CustMemoLine3,
                 received_at: new Date().toISOString()
             }, { 
-                onConflict: 'transaction_id', // Prevents duplicates on retry
+                onConflict: 'transaction_id', // Prevents double-counting if the bank retries
                 ignoreDuplicates: true 
             });
 
         if (error) throw error;
 
-        // Return 200/201 to the bank so they stop retrying
+        // Return 200/OK so the bank stops retrying the IPN
         return res.status(200).json({ 
             status: "Success", 
             message: "IPN Accepted",
@@ -98,12 +98,16 @@ app.post('/ipn', authenticateIPN, async (req, res) => {
 
     } catch (err) {
         console.error("Supabase Error:", err.message);
-        return res.status(500).json({ status: "Error", message: "Retry Later" });
+        // Returning 500 tells the bank to try sending the IPN again later
+        return res.status(500).json({ status: "Error", message: "Server busy" });
     }
 });
 
-// Port Binding for Render
+/**
+ * SERVER START
+ * '0.0.0.0' is required for Render to discover your app's port.
+ */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server listening on port ${PORT}`);
+    console.log(`Server live on port ${PORT}`);
 });
