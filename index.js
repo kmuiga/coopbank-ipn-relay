@@ -1,17 +1,28 @@
-const express = require('express');
-const { createClient } = require('@supabase/supabase-js');
+import express from 'express';
+import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 app.use(express.json());
 
-// 1. Initialize Supabase
+/**
+ * 1. FAST-WAKE HEALTH CHECK
+ * Responds immediately to Render/UptimeRobot to prevent "hibernate-wake-error"
+ */
+app.get('/', (req, res) => {
+    res.status(200).send('Coop IPN Relay is Online');
+});
+
+// 2. INITIALIZE SUPABASE
 const supabase = createClient(
     process.env.SUPABASE_URL, 
     process.env.SUPABASE_KEY
 );
 
-// 2. Precision Extractors
+/**
+ * 3. LEAD DEVELOPER PRECISION EXTRACTORS
+ */
 const extractors = {
+    // Extracts M-Pesa Code or 12-digit POS ref
     finalRef: (memo1, narration) => {
         if (!memo1 || !narration) return null;
         const isPos = memo1.toUpperCase().startsWith('POS');
@@ -21,10 +32,12 @@ const extractors = {
         }
         return memo1.split('~')[0]?.trim();
     },
+    // Cleans tenant name from bank string
     tenantName: (memo3, isPos) => {
         if (isPos || !memo3) return null;
         return memo3.replace(/^[0-9]+~/, '').trim();
     },
+    // Converts phone number to local format
     tenantMobile: (narration) => {
         if (!narration) return null;
         const mobileMatch = narration.match(/254([0-9]{9})/);
@@ -32,31 +45,25 @@ const extractors = {
     }
 };
 
-// 3. Auth Middleware
+/**
+ * 4. AUTH MIDDLEWARE: Strictly for the Bank
+ */
 const authenticateIPN = (req, res, next) => {
-    const authHeader = req.headers.authorization;
-    let basicUser, basicPass;
-    if (authHeader) {
-        const credentials = Buffer.from(authHeader.split(' ')[1], 'base64').toString('ascii');
-        [basicUser, basicPass] = credentials.split(':');
-    }
-    const isBasicValid = (basicUser === process.env.IPN_USER && basicPass === process.env.IPN_PASS);
     const isCustomValid = (req.headers['username'] === 'elara_bank' && req.headers['password'] === 'BankSafe@2024');
-
-    if (isBasicValid || isCustomValid) {
+    
+    if (isCustomValid) {
         next();
     } else {
         res.status(401).json({ "Status": "Error", "Message": "Unauthorized" });
     }
 };
 
-// 4. Routes (Consolidated for speed)
-app.get('/', (req, res) => {
-    res.status(200).send('Coop IPN Relay is Online');
-});
-
+/**
+ * 5. POST ROUTE: Receives and saves Bank Data
+ */
 app.post('/', authenticateIPN, async (req, res) => {
     const payload = req.body;
+
     if (!payload || !payload.TransactionId) {
         return res.status(400).json({ "Status": "Error", "Message": "Invalid Payload" });
     }
@@ -87,17 +94,25 @@ app.post('/', authenticateIPN, async (req, res) => {
                 cust_memo_line2: payload.CustMemoLine2,
                 cust_memo_line3: payload.CustMemoLine3,
                 received_at: new Date().toISOString()
-            }, { onConflict: 'transaction_id' });
+            }, { 
+                onConflict: 'transaction_id'
+            });
 
         if (error) throw error;
-        return res.status(200).json({ "Status": "Success", "Message": "Received" });
+
+        // Correct response for Bank Gateway
+        return res.status(200).json({ 
+            "Status": "Success", 
+            "Message": "Received"
+        });
+
     } catch (err) {
-        console.error("Supabase Error:", err.message);
+        console.error("Supabase Relay Error:", err.message);
         return res.status(500).json({ "Status": "Error", "Message": "Internal Server Error" });
     }
 });
 
-// 5. Port binding
+// 6. PORT BINDING (Render Standard)
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Relay active on port ${PORT}`);
